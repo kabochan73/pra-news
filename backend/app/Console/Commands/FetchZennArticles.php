@@ -40,7 +40,8 @@ class FetchZennArticles extends Command
                 continue;
             }
 
-            $summary = $this->summarize($article['title'], $url);
+            $body = $this->fetchArticleBody($article['slug']);
+            $summary = $this->summarize($article['title'], $body);
 
             if ($summary === null) {
                 $this->warn("Failed to summarize: {$article['title']}");
@@ -65,8 +66,25 @@ class FetchZennArticles extends Command
         $this->info("Done. {$newCount} new articles saved.");
     }
 
-    private function summarize(string $title, string $url): ?string
+    private function fetchArticleBody(string $slug): string
     {
+        $response = Http::get("https://zenn.dev/api/articles/{$slug}");
+
+        if (!$response->successful()) {
+            return '';
+        }
+
+        $html = $response->json('article.body_html', '');
+        $text = strip_tags($html);
+        $text = preg_replace('/\s+/', ' ', $text);
+
+        return mb_substr(trim($text), 0, 3000);
+    }
+
+    private function summarize(string $title, string $body): ?string
+    {
+        $content = "以下のZenn記事を日本語で5文以内で要約してください。\n\nタイトル: {$title}\n\n本文:\n{$body}";
+
         $response = Http::withHeaders([
             'x-api-key' => config('services.anthropic.api_key'),
             'anthropic-version' => '2023-06-01',
@@ -77,7 +95,7 @@ class FetchZennArticles extends Command
             'messages' => [
                 [
                     'role' => 'user',
-                    'content' => "以下のZenn記事を日本語で3文以内で要約してください。\n\nタイトル: {$title}\nURL: {$url}",
+                    'content' => $content,
                 ],
             ],
         ]);
