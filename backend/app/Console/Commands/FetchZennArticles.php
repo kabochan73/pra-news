@@ -1,0 +1,106 @@
+<?php
+
+namespace App\Console\Commands;
+
+use App\Models\Article;
+use Illuminate\Console\Command;
+use Illuminate\Support\Facades\Http;
+
+class FetchZennArticles extends Command
+{
+    protected $signature = 'zenn:fetch';
+    protected $description = 'Fetch latest Laravel articles from Zenn and summarize with Claude';
+
+    private const MAX_ARTICLES = 50;
+    private const FETCH_COUNT = 10;
+
+    public function handle(): void
+    {
+        $this->info('Fetching Zenn articles...');
+
+        $response = Http::get('https://zenn.dev/api/articles', [
+            'topicname' => 'laravel',
+            'order' => 'latest',
+            'count' => self::FETCH_COUNT,
+        ]);
+
+        if (!$response->successful()) {
+            $this->error('Failed to fetch articles from Zenn.');
+            return;
+        }
+
+        $articles = $response->json('articles', []);
+        $newCount = 0;
+
+        foreach ($articles as $article) {
+            $url = 'https://zenn.dev' . $article['path'];
+
+            if (Article::where('url', $url)->exists()) {
+                $this->line("Skip (already exists): {$article['title']}");
+                continue;
+            }
+
+            $summary = $this->summarize($article['title'], $url);
+
+            if ($summary === null) {
+                $this->warn("Failed to summarize: {$article['title']}");
+                continue;
+            }
+
+            Article::create([
+                'title' => $article['title'],
+                'url' => $url,
+                'author' => $article['user']['username'] ?? 'unknown',
+                'published_at' => $article['published_at'],
+                'tags' => array_map(fn($t) => $t['name'], $article['topics'] ?? []),
+                'summary' => $summary,
+            ]);
+
+            $this->info("Saved: {$article['title']}");
+            $newCount++;
+        }
+
+        $this->pruneOldArticles();
+
+        $this->info("Done. {$newCount} new articles saved.");
+    }
+
+    private function summarize(string $title, string $url): ?string
+    {
+        $response = Http::withHeaders([
+            'x-api-key' => config('services.anthropic.api_key'),
+            'anthropic-version' => '2023-06-01',
+            'content-type' => 'application/json',
+        ])->post('https://api.anthropic.com/v1/messages', [
+            'model' => 'claude-haiku-4-5',
+            'max_tokens' => 300,
+            'messages' => [
+                [
+                    'role' => 'user',
+                    'content' => "以下のZenn記事を日本語で3文以内で要約してください。\n\nタイトル: {$title}\nURL: {$url}",
+                ],
+            ],
+        ]);
+
+        if (!$response->successful()) {
+            return null;
+        }
+
+        return $response->json('content.0.text');
+    }
+
+    private function pruneOldArticles(): void
+    {
+        $count = Article::count();
+
+        if ($count <= self::MAX_ARTICLES) {
+            return;
+        }
+
+        $deleteCount = $count - self::MAX_ARTICLES;
+        $oldest = Article::orderBy('published_at')->limit($deleteCount)->pluck('id');
+        Article::whereIn('id', $oldest)->delete();
+
+        $this->info("Deleted {$deleteCount} old articles.");
+    }
+}
